@@ -6,7 +6,7 @@ from WebStreamer.bot import StreamBot
 from WebStreamer.utils.database import Database
 from WebStreamer.utils.human_readable import humanbytes
 from WebStreamer.vars import Var
-from pyrogram import Client, filters, enums  from pyrogram import filters, Client
+from pyrogram import Client, filters, enums
 from pyrogram.errors import FloodWait, UserNotParticipant
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 db = Database(Var.DATABASE_URL, Var.SESSION_NAME)
