@@ -38,6 +38,17 @@ async def media_streamer(request, message_id: int):
     media_msg = await StreamBot.get_messages(Var.BIN_CHANNEL, message_id)
     file_properties = await TGCustomYield().generate_file_properties(media_msg)
     file_size = file_properties.file_size
+    
+    # Check if this is a download request
+    is_download = False
+    if request.query.get('download'):
+        is_download = True
+
+    # Determine the file name and MIME type
+    file_name = file_properties.file_name if file_properties.file_name \
+        else f"{secrets.token_hex(2)}.jpeg"
+    mime_type = file_properties.mime_type if file_properties.mime_type \
+        else mimetypes.guess_type(file_name)[0] or "application/octet-stream"
 
     if range_header:
         from_bytes, until_bytes = range_header.replace('bytes=', '').split('-')
@@ -57,23 +68,113 @@ async def media_streamer(request, message_id: int):
     body = TGCustomYield().yield_file(media_msg, offset, first_part_cut, last_part_cut, part_count,
                                       new_chunk_size)
 
-    file_name = file_properties.file_name if file_properties.file_name \
-        else f"{secrets.token_hex(2)}.jpeg"
-    mime_type = file_properties.mime_type if file_properties.mime_type \
-        else f"{mimetypes.guess_type(file_name)}"
+    # Set appropriate Content-Disposition header
+    content_disposition = 'attachment' if is_download else 'inline'
+    
+    # Determine if this is a streamable media type (video or audio)
+    is_streamable = mime_type.startswith(('video/', 'audio/'))
+    
+    # Define headers for the response
+    headers = {
+        "Content-Type": mime_type,
+        "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+        "Content-Disposition": f'{content_disposition}; filename="{file_name}"',
+        "Accept-Ranges": "bytes",
+    }
 
+    # Add additional headers for video streaming
+    if is_streamable and not is_download:
+        # Add headers for better HTML5 player compatibility
+        if mime_type.startswith('video/'):
+            headers["X-Content-Duration"] = str(getattr(file_properties, 'duration', 0))
+    
+    # Create and return response
     return_resp = web.Response(
         status=206 if range_header else 200,
         body=body,
-        headers={
-            "Content-Type": mime_type,
-            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-            "Content-Disposition": f'attachment; filename="{file_name}"',
-            "Accept-Ranges": "bytes",
-        }
+        headers=headers
     )
 
     if return_resp.status == 200:
         return_resp.headers.add("Content-Length", str(file_size))
 
     return return_resp
+
+
+# New route for HTML5 player page (optional)
+@routes.get(r"/{message_id:\d+}/{name}/player")
+async def video_player_page(request):
+    try:
+        message_id = int(request.match_info['message_id'])
+        file_name = request.match_info['name']
+        
+        # Generate direct link to the video/audio
+        stream_url = f"/{message_id}/{file_name}"
+        download_url = f"/{message_id}/{file_name}?download=1"
+        
+        # Get file properties to determine media type
+        media_msg = await StreamBot.get_messages(Var.BIN_CHANNEL, message_id)
+        file_properties = await TGCustomYield().generate_file_properties(media_msg)
+        mime_type = file_properties.mime_type if file_properties.mime_type \
+            else mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        
+        # Create appropriate player HTML
+        is_video = mime_type.startswith('video/')
+        is_audio = mime_type.startswith('audio/')
+        
+        # Generate appropriate HTML5 player based on media type
+        player_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Media Player - {file_name}</title>
+            <style>
+                body {{ margin: 0; padding: 0; background-color: #000; color: #fff; font-family: Arial, sans-serif; }}
+                .container {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; width: 100%; }}
+                .player-wrapper {{ width: 100%; max-width: 900px; }}
+                .video-player {{ width: 100%; height: auto; max-height: 80vh; }}
+                .audio-player {{ width: 100%; margin: 20px 0; }}
+                .title {{ margin-bottom: 20px; text-align: center; }}
+                .download-btn {{ margin-top: 20px; padding: 10px 20px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 4px; }}
+                .download-btn:hover {{ background-color: #45a049; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h2 class="title">{file_name}</h2>
+                <div class="player-wrapper">
+        """
+        
+        if is_video:
+            player_html += f"""
+                    <video class="video-player" controls autoplay>
+                        <source src="{stream_url}" type="{mime_type}">
+                        Your browser does not support the video tag.
+                    </video>
+            """
+        elif is_audio:
+            player_html += f"""
+                    <audio class="audio-player" controls autoplay>
+                        <source src="{stream_url}" type="{mime_type}">
+                        Your browser does not support the audio tag.
+                    </audio>
+            """
+        else:
+            player_html += f"""
+                    <p>This file type ({mime_type}) is not supported for streaming playback.</p>
+            """
+        
+        player_html += f"""
+                </div>
+                <a href="{download_url}" class="download-btn">Download File</a>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return web.Response(text=player_html, content_type='text/html')
+    except Exception as e:
+        logging.error(e)
+        raise web.HTTPNotFound
