@@ -98,23 +98,24 @@ async def private_receive_handler(c: Client, m: Message):
             parse_mode=enums.ParseMode.MARKDOWN,
             quote=True
         )
-    
-    await m.reply_text(
-        text=msg_text.format(file_name, file_size, stream_link),
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Download Now", url=stream_link)]]),
-        parse_mode=enums.ParseMode.MARKDOWN,  # Added parse mode here too
-        quote=True
-    )
-    
-except FloodWait as e:
-    print(f"Sleeping for {str(e.x)}s")
-    await asyncio.sleep(e.x)
-    await c.send_message(
-        chat_id=Var.BIN_CHANNEL,
-        text=f"Got FloodWait of {str(e.x)}s from [{m.from_user.first_name}](tg://user?id={m.from_user.id})\n\n**User ID:** `{str(m.from_user.id)}`",
-        disable_web_page_preview=True,
-        parse_mode=enums.ParseMode.MARKDOWN  # Updated parse mode here as well
-    )
+        
+        await m.reply_text(
+            text=msg_text.format(file_name, file_size, stream_link),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Download Now", url=stream_link)]]),
+            parse_mode=enums.ParseMode.MARKDOWN,
+            quote=True
+        )
+        
+    except FloodWait as e:
+        print(f"Sleeping for {str(e.x)}s")
+        await asyncio.sleep(e.x)
+        await c.send_message(
+            chat_id=Var.BIN_CHANNEL,
+            text=f"Got FloodWait of {str(e.x)}s from [{m.from_user.first_name}](tg://user?id={m.from_user.id})\n\n**User ID:** `{str(m.from_user.id)}`",
+            disable_web_page_preview=True,
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+
 
 @StreamBot.on_message(filters.channel & (filters.document | filters.video), group=-1)
 async def channel_receive_handler(bot, broadcast):
