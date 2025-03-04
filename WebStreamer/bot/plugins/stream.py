@@ -70,14 +70,26 @@ async def private_receive_handler(c: Client, m: Message):
             return
     try:
         log_msg = await m.forward(chat_id=Var.BIN_CHANNEL)
+    
         file_name = get_media_file_name(m)
         file_size = humanbytes(get_media_file_size(m))
-        stream_link = "https://{}/{}/{}".format(Var.FQDN, log_msg.message_id, file_name) if Var.ON_HEROKU or Var.NO_PORT else \
+        
+        # Fix for compatibility with different Pyrogram versions
+        if hasattr(log_msg, 'message_id'):
+            msg_id = log_msg.message_id
+        elif hasattr(log_msg, 'id'):
+            msg_id = log_msg.id
+        else:
+            # Fallback with debug info
+            print("Available attributes:", dir(log_msg))
+            msg_id = getattr(log_msg, 'id', 0)
+        
+        stream_link = "https://{}/{}/{}".format(Var.FQDN, msg_id, file_name) if Var.ON_HEROKU or Var.NO_PORT else \
             "http://{}:{}/{}/{}".format(Var.FQDN,
                                     Var.PORT,
-                                    log_msg.message_id,
+                                    msg_id,
                                     file_name)
-
+    
         msg_text = "Bruh! 😁\nYour Link Generated! 🤓\n\n📂 **File Name:** `{}`\n**File Size:** `{}`\n\n📥 **Download Link:** `{}`"
         await log_msg.reply_text(text=f"Requested by [{m.from_user.first_name}](tg://user?id={m.from_user.id})\n**User ID:** `{m.from_user.id}`\n**Download Link:** {stream_link}", disable_web_page_preview=True, parse_mode="Markdown", quote=True)
         await m.reply_text(
