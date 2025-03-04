@@ -2,19 +2,48 @@
 
 import math
 import logging
-import asyncio
-import aiohttp
-from WebStreamer.vars import Var
-from WebStreamer.utils.time_format import get_readable_time
-from WebStreamer.utils.custom_dl import streamer
-from aiohttp import web
-from aiohttp.http_exceptions import BadStatusLine
-from WebStreamer.bot import StreamBot
-from WebStreamer import StartTime
-from WebStreamer.utils.human_readable import humanbytes
-import urllib.parse
-import os
 import time
+from WebStreamer.vars import Var
+from aiohttp import web
+from WebStreamer.bot import StreamBot
+from WebStreamer.utils.custom_dl import streamer
+import urllib.parse
+
+# Import the time_format module
+try:
+    from WebStreamer.utils.time_format import get_readable_time
+    from WebStreamer import StartTime
+except ImportError:
+    # Fallback if import fails
+    def get_readable_time(seconds: int) -> str:
+        count = 0
+        ping_time = ""
+        time_list = []
+        time_suffix_list = ["s", "m", "h", "days"]
+
+        while count < 4:
+            count += 1
+            if count < 3:
+                remainder, result = divmod(seconds, 60)
+            else:
+                remainder, result = divmod(seconds, 24)
+            if seconds == 0 and remainder == 0:
+                break
+            time_list.append(int(result))
+            seconds = int(remainder)
+
+        for x in range(len(time_list)):
+            time_list[x] = str(time_list[x]) + time_suffix_list[x]
+        if len(time_list) == 4:
+            ping_time += f"{time_list.pop()}, "
+
+        time_list.reverse()
+        ping_time += ":".join(time_list)
+
+        return ping_time
+    
+    # Define StartTime if not available
+    StartTime = time.time()
 
 routes = web.RouteTableDef()
 
