@@ -1,233 +1,242 @@
-# Taken from megadlbot_oss <https://github.com/eyaadh/megadlbot_oss/blob/master/mega/telegram/utils/custom_download.py>
-# Thanks to Eyaadh <https://github.com/eyaadh>
+# (c) @AbirHasan2005
 
 import math
-from typing import Union
-from pyrogram.types import Message
-from ..bot import StreamBot
-from pyrogram import Client, utils, raw
-from pyrogram.session import Session, Auth
-from pyrogram.errors import AuthBytesInvalid
-from pyrogram.file_id import FileId, FileType, ThumbnailSource
+import logging
+import asyncio
+import aiohttp
+from WebStreamer.vars import Var
+from WebStreamer.utils.time_format import get_readable_time
+from WebStreamer.utils.custom_dl import streamer
+from aiohttp import web
+from aiohttp.http_exceptions import BadStatusLine
+from WebStreamer.bot import StreamBot
+from WebStreamer import StartTime
+from WebStreamer.utils.human_readable import humanbytes
+import urllib.parse
+import os
+import time
 
+routes = web.RouteTableDef()
 
-async def chunk_size(length):
-    return 2 ** max(min(math.ceil(math.log2(length / 1024)), 10), 2) * 1024
+@routes.get("/", allow_head=True)
+async def root_route_handler(request):
+    return web.json_response({"status": "running",
+                             "maintained_by": "AbirHasan2005",
+                             "uptime": get_readable_time(time.time() - StartTime),
+                             "telegram_bot": '@'+(await StreamBot.get_me()).username})
 
+@routes.get("/{message_id}", allow_head=True)
+async def stream_handler(request):
+    try:
+        message_id = int(request.match_info['message_id'])
+        return await media_streamer(request, message_id)
+    except ValueError as e:
+        logging.error(e)
+        raise web.HTTPNotFound
 
-async def offset_fix(offset, chunksize):
-    offset -= offset % chunksize
-    return offset
+@routes.get("/{message_id}/{file_name}", allow_head=True)
+async def stream_handler_with_name(request):
+    try:
+        message_id = int(request.match_info['message_id'])
+        file_name = request.match_info['file_name']
+        return await media_streamer(request, message_id, file_name)
+    except ValueError as e:
+        logging.error(e)
+        raise web.HTTPNotFound
 
+@routes.get("/player/{message_id}", allow_head=True)
+async def player_handler(request):
+    try:
+        message_id = int(request.match_info['message_id'])
+        return await serve_player_page(request, message_id)
+    except ValueError as e:
+        logging.error(e)
+        raise web.HTTPNotFound
 
-class TGCustomYield:
-    def __init__(self):
-        """ A custom method to stream files from telegram.
-        functions:
-            generate_file_properties: returns the properties for a media on a specific message contained in FileId class.
-            generate_media_session: returns the media session for the DC that contains the media file on the message.
-            yield_file: yield a file from telegram servers for streaming.
+async def serve_player_page(request, message_id):
+    try:
+        # Get file properties
+        file_properties = await streamer.get_file_properties(message_id)
+        file_name = file_properties.get("file_name", "Unknown")
+        mime_type = file_properties.get("mime_type", "application/octet-stream")
+        media_type = file_properties.get("media_type", "document")
+        
+        # Generate stream URL
+        stream_url = f"{request.url.scheme}://{request.url.host}"
+        if request.url.port and request.url.port != 80 and request.url.port != 443:
+            stream_url += f":{request.url.port}"
+        stream_url += f"/{message_id}/{urllib.parse.quote(file_name)}"
+        
+        # Generate download URL
+        download_url = f"{stream_url}?download=1"
+        
+        # Determine if media is streamable
+        is_video = media_type == "video" or mime_type.startswith("video/")
+        is_audio = media_type == "audio" or mime_type.startswith("audio/")
+        
+        # Generate HTML for player
+        player_html = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>{file_name} - Stream Player</title>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    background-color: #f0f0f0;
+                    margin: 0;
+                    padding: 0;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    min-height: 100vh;
+                }}
+                .container {{
+                    background-color: white;
+                    border-radius: 8px;
+                    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+                    overflow: hidden;
+                    width: 90%;
+                    max-width: 800px;
+                }}
+                .title {{
+                    background-color: #2196F3;
+                    color: white;
+                    padding: 15px;
+                    text-align: center;
+                    font-size: 18px;
+                    margin: 0;
+                    word-break: break-all;
+                }}
+                .player-wrapper {{
+                    padding: 20px;
+                }}
+                .video-player {{
+                    width: 100%;
+                    max-height: 500px;
+                    background-color: #000;
+                }}
+                .audio-player {{
+                    width: 100%;
+                    margin: 20px 0;
+                }}
+                .download-btn {{
+                    display: block;
+                    text-align: center;
+                    background-color: #4CAF50;
+                    color: white;
+                    padding: 10px;
+                    text-decoration: none;
+                    border-radius: 4px;
+                    margin: 20px auto;
+                    width: 200px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h2 class="title">{file_name}</h2>
+                <div class="player-wrapper">
         """
-        self.main_bot = StreamBot
-
-    @staticmethod
-    async def generate_file_properties(msg: Message):
-        error_message = "This message doesn't contain any downloadable media"
-        available_media = ("audio", "document", "photo", "sticker", "animation", "video", "voice", "video_note")
-
-        if isinstance(msg, Message):
-            for kind in available_media:
-                media = getattr(msg, kind, None)
-
-                if media is not None:
-                    break
-            else:
-                raise ValueError(error_message)
+        
+        if is_video:
+            player_html += f"""
+                    <video class="video-player" controls autoplay>
+                        <source src="{stream_url}" type="{mime_type}">
+                        Your browser does not support the video tag.
+                    </video>
+            """
+        elif is_audio:
+            player_html += f"""
+                    <audio class="audio-player" controls autoplay>
+                        <source src="{stream_url}" type="{mime_type}">
+                        Your browser does not support the audio tag.
+                    </audio>
+            """
         else:
-            media = msg
+            player_html += f"""
+                    <p>This file type ({mime_type}) is not supported for streaming playback.</p>
+            """
+        
+        player_html += f"""
+                </div>
+                <a href="{download_url}" class="download-btn">Download File</a>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return web.Response(text=player_html, content_type='text/html')
+    except Exception as e:
+        logging.error(f"Error in player page: {e}")
+        raise web.HTTPNotFound
 
-        if isinstance(media, str):
-            file_id_str = media
+async def media_streamer(request, message_id, file_name=None):
+    try:
+        range_header = request.headers.get('Range', 0)
+        is_download = 'download' in request.query and request.query['download'] == '1'
+        
+        # Get file properties
+        file_properties = await streamer.get_file_properties(message_id)
+        if not file_name:
+            file_name = file_properties.get("file_name", f"file_{message_id}")
+        mime_type = file_properties.get("mime_type", "application/octet-stream")
+        file_size = file_properties.get("file_size", 0)
+        
+        if range_header:
+            from_bytes, until_bytes = range_header.replace('bytes=', '').split('-')
+            from_bytes = int(from_bytes)
+            until_bytes = int(until_bytes) if until_bytes else file_size - 1
         else:
-            file_id_str = media.file_id
+            from_bytes = 0
+            until_bytes = file_size - 1
 
-        file_id_obj = FileId.decode(file_id_str)
-
-        # The below lines are added to avoid a break in routes.py
-        setattr(file_id_obj, "file_size", getattr(media, "file_size", 0))
-        setattr(file_id_obj, "mime_type", getattr(media, "mime_type", ""))
-        setattr(file_id_obj, "file_name", getattr(media, "file_name", ""))
-
-        return file_id_obj
-
-    async def generate_media_session(self, client: Client, msg: Message):
-        data = await self.generate_file_properties(msg)
-
-        media_session = client.media_sessions.get(data.dc_id, None)
-
-        if media_session is None:
-            if data.dc_id != await client.storage.dc_id():
-                media_session = Session(
-                    client, data.dc_id, await Auth(client, data.dc_id, await client.storage.test_mode()).create(),
-                    await client.storage.test_mode(), is_media=True
-                )
-                await media_session.start()
-
-                for _ in range(3):
-                    exported_auth = await client.send(
-                        raw.functions.auth.ExportAuthorization(
-                            dc_id=data.dc_id
-                        )
-                    )
-
-                    try:
-                        await media_session.send(
-                            raw.functions.auth.ImportAuthorization(
-                                id=exported_auth.id,
-                                bytes=exported_auth.bytes
-                            )
-                        )
-                    except AuthBytesInvalid:
-                        continue
-                    else:
-                        break
-                else:
-                    await media_session.stop()
-                    raise AuthBytesInvalid
-            else:
-                media_session = Session(
-                    client, data.dc_id, await client.storage.auth_key(),
-                    await client.storage.test_mode(), is_media=True
-                )
-                await media_session.start()
-
-            client.media_sessions[data.dc_id] = media_session
-
-        return media_session
-
-    @staticmethod
-    async def get_location(file_id: FileId):
-        file_type = file_id.file_type
-
-        if file_type == FileType.CHAT_PHOTO:
-            if file_id.chat_id > 0:
-                peer = raw.types.InputPeerUser(
-                    user_id=file_id.chat_id,
-                    access_hash=file_id.chat_access_hash
-                )
-            else:
-                if file_id.chat_access_hash == 0:
-                    peer = raw.types.InputPeerChat(
-                        chat_id=-file_id.chat_id
-                    )
-                else:
-                    peer = raw.types.InputPeerChannel(
-                        channel_id=utils.get_channel_id(file_id.chat_id),
-                        access_hash=file_id.chat_access_hash
-                    )
-
-            location = raw.types.InputPeerPhotoFileLocation(
-                peer=peer,
-                volume_id=file_id.volume_id,
-                local_id=file_id.local_id,
-                big=file_id.thumbnail_source == ThumbnailSource.CHAT_PHOTO_BIG
-            )
-        elif file_type == FileType.PHOTO:
-            location = raw.types.InputPhotoFileLocation(
-                id=file_id.media_id,
-                access_hash=file_id.access_hash,
-                file_reference=file_id.file_reference,
-                thumb_size=file_id.thumbnail_size
-            )
+        # Calculate chunk size
+        chunk_size = 1024 * 1024  # 1MB chunk
+        total_size = until_bytes - from_bytes + 1
+        
+        part_count = math.ceil(total_size / chunk_size)
+        last_part_cut = total_size % chunk_size
+        
+        if last_part_cut == 0:
+            last_part_cut = chunk_size
+        
+        headers = {
+            'Content-Type': mime_type,
+            'Accept-Ranges': 'bytes',
+            'Content-Range': f'bytes {from_bytes}-{until_bytes}/{file_size}',
+            'Content-Length': str(total_size),
+        }
+        
+        # Set appropriate Content-Disposition header
+        if is_download:
+            headers['Content-Disposition'] = f'attachment; filename="{file_name}"'
         else:
-            location = raw.types.InputDocumentFileLocation(
-                id=file_id.media_id,
-                access_hash=file_id.access_hash,
-                file_reference=file_id.file_reference,
-                thumb_size=file_id.thumbnail_size
-            )
-
-        return location
-
-    async def yield_file(self, media_msg: Message, offset: int, first_part_cut: int,
-                         last_part_cut: int, part_count: int, chunk_size: int) -> Union[str, None]: #pylint: disable=unsubscriptable-object
-        client = self.main_bot
-        data = await self.generate_file_properties(media_msg)
-        media_session = await self.generate_media_session(client, media_msg)
-
-        current_part = 1
-
-        location = await self.get_location(data)
-
-        r = await media_session.send(
-            raw.functions.upload.GetFile(
-                location=location,
-                offset=offset,
-                limit=chunk_size
-            ),
-        )
-
-        if isinstance(r, raw.types.upload.File):
-            while current_part <= part_count:
-                chunk = r.bytes
-                if not chunk:
-                    break
-                offset += chunk_size
-                if part_count == 1:
-                    yield chunk[first_part_cut:last_part_cut]
-                    break
-                if current_part == 1:
-                    yield chunk[first_part_cut:]
-                if 1 < current_part <= part_count:
-                    yield chunk
-
-                r = await media_session.send(
-                    raw.functions.upload.GetFile(
-                        location=location,
-                        offset=offset,
-                        limit=chunk_size
-                    ),
-                )
-
-                current_part += 1
-
-    async def download_as_bytesio(self, media_msg: Message):
-        client = self.main_bot
-        data = await self.generate_file_properties(media_msg)
-        media_session = await self.generate_media_session(client, media_msg)
-
-        location = await self.get_location(data)
-
-        limit = 1024 * 1024
-        offset = 0
-
-        r = await media_session.send(
-            raw.functions.upload.GetFile(
-                location=location,
-                offset=offset,
-                limit=limit
-            )
-        )
-
-        if isinstance(r, raw.types.upload.File):
-            m_file = []
-            # m_file.name = file_name
-            while True:
-                chunk = r.bytes
-
-                if not chunk:
-                    break
-
-                m_file.append(chunk)
-
-                offset += limit
-
-                r = await media_session.send(
-                    raw.functions.upload.GetFile(
-                        location=location,
-                        offset=offset,
-                        limit=limit
-                    )
-                )
-
-            return m_file
+            headers['Content-Disposition'] = f'inline; filename="{file_name}"'
+        
+        # For video streaming, add more headers
+        if mime_type.startswith('video/'):
+            headers.update({
+                'Accept-Ranges': 'bytes',
+                'Cache-Control': 'max-age=604800'  # 1 week
+            })
+        
+        response = web.StreamResponse(status=206 if range_header else 200, headers=headers)
+        await response.prepare(request)
+        
+        for chunk_index in range(part_count):
+            offset = from_bytes + (chunk_index * chunk_size)
+            first_part_cut = min(chunk_size, total_size - (chunk_index * chunk_size))
+            
+            if chunk_index == 0:
+                first_part_cut = chunk_size - from_bytes % chunk_size
+            
+            chunk = await streamer.yield_file(message_id, offset, first_part_cut, last_part_cut, part_count, chunk_size)
+            await response.write(chunk)
+        
+        return response
+    except Exception as e:
+        logging.error(f"Error in media_streamer: {str(e)}")
+        raise web.HTTPInternalServerError(text=f"Error: {str(e)}")
