@@ -1,29 +1,31 @@
-# Taken from megadlbot_oss <https://github.com/eyaadh/megadlbot_oss/blob/master/mega/webserver/routes.py>
-# Thanks to Eyaadh <https://github.com/eyaadh>
+# (c) @AbirHasan2005
 
 import math
 import logging
-import secrets
-import mimetypes
-from ..vars import Var
+import asyncio
+import aiohttp
+from WebStreamer.vars import Var
+from WebStreamer.utils.time_format import get_readable_time
+from WebStreamer.utils.custom_dl import streamer
 from aiohttp import web
-from ..bot import StreamBot
-from ..utils.custom_dl import TGCustomYield, chunk_size, offset_fix
+from aiohttp.http_exceptions import BadStatusLine
+from WebStreamer.bot import StreamBot
+from WebStreamer import StartTime
+from WebStreamer.utils.human_readable import humanbytes
+import urllib.parse
+import os
+import time
 
 routes = web.RouteTableDef()
 
-
 @routes.get("/", allow_head=True)
 async def root_route_handler(request):
-    bot_details = await StreamBot.get_me()
     return web.json_response({"status": "running",
-                              "server_permission": "Open",
-                              "telegram_bot": '@'+bot_details.username})
+                             "maintained_by": "AbirHasan2005",
+                             "uptime": get_readable_time(time.time() - StartTime),
+                             "telegram_bot": '@'+(await StreamBot.get_me()).username})
 
-
-@routes.get("/{message_id}")
-@routes.get("/{message_id}/")
-@routes.get(r"/{message_id:\d+}/{name}")
+@routes.get("/{message_id}", allow_head=True)
 async def stream_handler(request):
     try:
         message_id = int(request.match_info['message_id'])
@@ -32,113 +34,105 @@ async def stream_handler(request):
         logging.error(e)
         raise web.HTTPNotFound
 
-
-async def media_streamer(request, message_id: int):
-    range_header = request.headers.get('Range', 0)
-    media_msg = await StreamBot.get_messages(Var.BIN_CHANNEL, message_id)
-    file_properties = await TGCustomYield().generate_file_properties(media_msg)
-    file_size = file_properties.file_size
-    
-    # Check if this is a download request
-    is_download = False
-    if request.query.get('download'):
-        is_download = True
-
-    # Determine the file name and MIME type
-    file_name = file_properties.file_name if file_properties.file_name \
-        else f"{secrets.token_hex(2)}.jpeg"
-    mime_type = file_properties.mime_type if file_properties.mime_type \
-        else mimetypes.guess_type(file_name)[0] or "application/octet-stream"
-
-    if range_header:
-        from_bytes, until_bytes = range_header.replace('bytes=', '').split('-')
-        from_bytes = int(from_bytes)
-        until_bytes = int(until_bytes) if until_bytes else file_size - 1
-    else:
-        from_bytes = request.http_range.start or 0
-        until_bytes = request.http_range.stop or file_size - 1
-
-    req_length = until_bytes - from_bytes
-
-    new_chunk_size = await chunk_size(req_length)
-    offset = await offset_fix(from_bytes, new_chunk_size)
-    first_part_cut = from_bytes - offset
-    last_part_cut = (until_bytes % new_chunk_size) + 1
-    part_count = math.ceil(req_length / new_chunk_size)
-    body = TGCustomYield().yield_file(media_msg, offset, first_part_cut, last_part_cut, part_count,
-                                      new_chunk_size)
-
-    # Set appropriate Content-Disposition header
-    content_disposition = 'attachment' if is_download else 'inline'
-    
-    # Determine if this is a streamable media type (video or audio)
-    is_streamable = mime_type.startswith(('video/', 'audio/'))
-    
-    # Define headers for the response
-    headers = {
-        "Content-Type": mime_type,
-        "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-        "Content-Disposition": f'{content_disposition}; filename="{file_name}"',
-        "Accept-Ranges": "bytes",
-    }
-
-    # Add additional headers for video streaming
-    if is_streamable and not is_download:
-        # Add headers for better HTML5 player compatibility
-        if mime_type.startswith('video/'):
-            headers["X-Content-Duration"] = str(getattr(file_properties, 'duration', 0))
-    
-    # Create and return response
-    return_resp = web.Response(
-        status=206 if range_header else 200,
-        body=body,
-        headers=headers
-    )
-
-    if return_resp.status == 200:
-        return_resp.headers.add("Content-Length", str(file_size))
-
-    return return_resp
-
-
-# New route for HTML5 player page (optional)
-@routes.get(r"/{message_id:\d+}/{name}/player")
-async def video_player_page(request):
+@routes.get("/{message_id}/{file_name}", allow_head=True)
+async def stream_handler_with_name(request):
     try:
         message_id = int(request.match_info['message_id'])
-        file_name = request.match_info['name']
+        file_name = request.match_info['file_name']
+        return await media_streamer(request, message_id, file_name)
+    except ValueError as e:
+        logging.error(e)
+        raise web.HTTPNotFound
+
+@routes.get("/player/{message_id}", allow_head=True)
+async def player_handler(request):
+    try:
+        message_id = int(request.match_info['message_id'])
+        return await serve_player_page(request, message_id)
+    except ValueError as e:
+        logging.error(e)
+        raise web.HTTPNotFound
+
+async def serve_player_page(request, message_id):
+    try:
+        # Get file properties
+        file_properties = await streamer.get_file_properties(message_id)
+        file_name = file_properties.get("file_name", "Unknown")
+        mime_type = file_properties.get("mime_type", "application/octet-stream")
+        media_type = file_properties.get("media_type", "document")
         
-        # Generate direct link to the video/audio
-        stream_url = f"/{message_id}/{file_name}"
-        download_url = f"/{message_id}/{file_name}?download=1"
+        # Generate stream URL
+        stream_url = f"{request.url.scheme}://{request.url.host}"
+        if request.url.port and request.url.port != 80 and request.url.port != 443:
+            stream_url += f":{request.url.port}"
+        stream_url += f"/{message_id}/{urllib.parse.quote(file_name)}"
         
-        # Get file properties to determine media type
-        media_msg = await StreamBot.get_messages(Var.BIN_CHANNEL, message_id)
-        file_properties = await TGCustomYield().generate_file_properties(media_msg)
-        mime_type = file_properties.mime_type if file_properties.mime_type \
-            else mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        # Generate download URL
+        download_url = f"{stream_url}?download=1"
         
-        # Create appropriate player HTML
-        is_video = mime_type.startswith('video/')
-        is_audio = mime_type.startswith('audio/')
+        # Determine if media is streamable
+        is_video = media_type == "video" or mime_type.startswith("video/")
+        is_audio = media_type == "audio" or mime_type.startswith("audio/")
         
-        # Generate appropriate HTML5 player based on media type
+        # Generate HTML for player
         player_html = f"""
         <!DOCTYPE html>
-        <html>
+        <html lang="en">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Media Player - {file_name}</title>
+            <title>{file_name} - Stream Player</title>
             <style>
-                body {{ margin: 0; padding: 0; background-color: #000; color: #fff; font-family: Arial, sans-serif; }}
-                .container {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; width: 100%; }}
-                .player-wrapper {{ width: 100%; max-width: 900px; }}
-                .video-player {{ width: 100%; height: auto; max-height: 80vh; }}
-                .audio-player {{ width: 100%; margin: 20px 0; }}
-                .title {{ margin-bottom: 20px; text-align: center; }}
-                .download-btn {{ margin-top: 20px; padding: 10px 20px; background-color: #4CAF50; color: white; text-decoration: none; border-radius: 4px; }}
-                .download-btn:hover {{ background-color: #45a049; }}
+                body {{
+                    font-family: Arial, sans-serif;
+                    background-color: #f0f0f0;
+                    margin: 0;
+                    padding: 0;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    min-height: 100vh;
+                }}
+                .container {{
+                    background-color: white;
+                    border-radius: 8px;
+                    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+                    overflow: hidden;
+                    width: 90%;
+                    max-width: 800px;
+                }}
+                .title {{
+                    background-color: #2196F3;
+                    color: white;
+                    padding: 15px;
+                    text-align: center;
+                    font-size: 18px;
+                    margin: 0;
+                    word-break: break-all;
+                }}
+                .player-wrapper {{
+                    padding: 20px;
+                }}
+                .video-player {{
+                    width: 100%;
+                    max-height: 500px;
+                    background-color: #000;
+                }}
+                .audio-player {{
+                    width: 100%;
+                    margin: 20px 0;
+                }}
+                .download-btn {{
+                    display: block;
+                    text-align: center;
+                    background-color: #4CAF50;
+                    color: white;
+                    padding: 10px;
+                    text-decoration: none;
+                    border-radius: 4px;
+                    margin: 20px auto;
+                    width: 200px;
+                }}
             </style>
         </head>
         <body>
@@ -176,5 +170,73 @@ async def video_player_page(request):
         
         return web.Response(text=player_html, content_type='text/html')
     except Exception as e:
-        logging.error(e)
+        logging.error(f"Error in player page: {e}")
         raise web.HTTPNotFound
+
+async def media_streamer(request, message_id, file_name=None):
+    try:
+        range_header = request.headers.get('Range', 0)
+        is_download = 'download' in request.query and request.query['download'] == '1'
+        
+        # Get file properties
+        file_properties = await streamer.get_file_properties(message_id)
+        if not file_name:
+            file_name = file_properties.get("file_name", f"file_{message_id}")
+        mime_type = file_properties.get("mime_type", "application/octet-stream")
+        file_size = file_properties.get("file_size", 0)
+        
+        if range_header:
+            from_bytes, until_bytes = range_header.replace('bytes=', '').split('-')
+            from_bytes = int(from_bytes)
+            until_bytes = int(until_bytes) if until_bytes else file_size - 1
+        else:
+            from_bytes = 0
+            until_bytes = file_size - 1
+
+        # Calculate chunk size
+        chunk_size = 1024 * 1024  # 1MB chunk
+        total_size = until_bytes - from_bytes + 1
+        
+        part_count = math.ceil(total_size / chunk_size)
+        last_part_cut = total_size % chunk_size
+        
+        if last_part_cut == 0:
+            last_part_cut = chunk_size
+        
+        headers = {
+            'Content-Type': mime_type,
+            'Accept-Ranges': 'bytes',
+            'Content-Range': f'bytes {from_bytes}-{until_bytes}/{file_size}',
+            'Content-Length': str(total_size),
+        }
+        
+        # Set appropriate Content-Disposition header
+        if is_download:
+            headers['Content-Disposition'] = f'attachment; filename="{file_name}"'
+        else:
+            headers['Content-Disposition'] = f'inline; filename="{file_name}"'
+        
+        # For video streaming, add more headers
+        if mime_type.startswith('video/'):
+            headers.update({
+                'Accept-Ranges': 'bytes',
+                'Cache-Control': 'max-age=604800'  # 1 week
+            })
+        
+        response = web.StreamResponse(status=206 if range_header else 200, headers=headers)
+        await response.prepare(request)
+        
+        for chunk_index in range(part_count):
+            offset = from_bytes + (chunk_index * chunk_size)
+            first_part_cut = min(chunk_size, total_size - (chunk_index * chunk_size))
+            
+            if chunk_index == 0:
+                first_part_cut = chunk_size - from_bytes % chunk_size
+            
+            chunk = await streamer.yield_file(message_id, offset, first_part_cut, last_part_cut, part_count, chunk_size)
+            await response.write(chunk)
+        
+        return response
+    except Exception as e:
+        logging.error(f"Error in media_streamer: {str(e)}")
+        raise web.HTTPInternalServerError(text=f"Error: {str(e)}")
